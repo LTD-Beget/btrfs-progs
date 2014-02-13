@@ -36,6 +36,7 @@
 #include "volumes.h"
 #include "version.h"
 #include "commands.h"
+#include "cmds-fi-disk_usage.h"
 #include "list_sort.h"
 #include "disk-io.h"
 
@@ -112,6 +113,7 @@ static const char * const filesystem_cmd_group_usage[] = {
 	NULL
 };
 
+#if 0
 static const char * const cmd_df_usage[] = {
        "btrfs filesystem df [options] <path>",
        "Show space usage information for a mount point",
@@ -126,6 +128,7 @@ static const char * const cmd_df_usage[] = {
 	"-t|--tbytes        show sizes in TiB, or tB with --si",
        NULL
 };
+#endif
 
 static int get_df(int fd, struct btrfs_ioctl_space_args **sargs_ret)
 {
@@ -175,6 +178,7 @@ static int get_df(int fd, struct btrfs_ioctl_space_args **sargs_ret)
 	return 0;
 }
 
+#if 0
 static void print_df(struct btrfs_ioctl_space_args *sargs, unsigned unit_mode)
 {
 	u64 i;
@@ -269,6 +273,7 @@ static int cmd_df(int argc, char **argv)
 	close_file_or_dir(fd, dirstream);
 	return !!ret;
 }
+#endif
 
 static int match_search_item_kernel(__u8 *fsid, char *mnt, char *label,
 					char *search)
@@ -1263,7 +1268,7 @@ static int cmd_label(int argc, char **argv)
 
 const struct cmd_group filesystem_cmd_group = {
 	filesystem_cmd_group_usage, NULL, {
-		{ "df", cmd_df, cmd_df_usage, NULL, 0 },
+		{ "df", cmd_filesystem_df, cmd_filesystem_df_usage, NULL, 0 },
 		{ "show", cmd_show, cmd_show_usage, NULL, 0 },
 		{ "sync", cmd_sync, cmd_sync_usage, NULL, 0 },
 		{ "defragment", cmd_defrag, cmd_defrag_usage, NULL, 0 },
