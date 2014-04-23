@@ -113,6 +113,26 @@ static const char * const filesystem_cmd_group_usage[] = {
 	NULL
 };
 
+static const char * const cmd_filesystem_df_usage[] = {
+       "btrfs filesystem df <path>",
+       "Show space usage information for a mount point",
+       NULL
+};
+
+static void print_df(struct btrfs_ioctl_space_args *sargs)
+{
+       u64 i;
+       struct btrfs_ioctl_space_info *sp = sargs->spaces;
+
+       for (i = 0; i < sargs->total_spaces; i++, sp++) {
+               printf("%s, %s: total=%s, used=%s\n",
+                       group_type_str(sp->flags),
+                       group_profile_str(sp->flags),
+                       pretty_size(sp->total_bytes),
+                       pretty_size(sp->used_bytes));
+       }
+}
+
 static int get_df(int fd, struct btrfs_ioctl_space_args **sargs_ret)
 {
 	u64 count = 0;
@@ -159,6 +179,37 @@ static int get_df(int fd, struct btrfs_ioctl_space_args **sargs_ret)
 	}
 	*sargs_ret = sargs;
 	return 0;
+}
+
+static int cmd_filesystem_df(int argc, char **argv)
+{
+       struct btrfs_ioctl_space_args *sargs = NULL;
+       int ret;
+       int fd;
+       char *path;
+       DIR *dirstream = NULL;
+
+       if (check_argc_exact(argc, 2))
+               usage(cmd_filesystem_df_usage);
+
+       path = argv[1];
+
+       fd = open_file_or_dir(path, &dirstream);
+       if (fd < 0) {
+               fprintf(stderr, "ERROR: can't access '%s'\n", path);
+               return 1;
+       }
+       ret = get_df(fd, &sargs);
+
+       if (!ret && sargs) {
+               print_df(sargs);
+               free(sargs);
+       } else {
+               fprintf(stderr, "ERROR: get_df failed %s\n", strerror(-ret));
+       }
+
+       close_file_or_dir(fd, dirstream);
+       return !!ret;
 }
 
 static int match_search_item_kernel(__u8 *fsid, char *mnt, char *label,
@@ -923,8 +974,8 @@ const struct cmd_group filesystem_cmd_group = {
 		{ "balance", cmd_balance, NULL, &balance_cmd_group, 1 },
 		{ "resize", cmd_resize, cmd_resize_usage, NULL, 0 },
 		{ "label", cmd_label, cmd_label_usage, NULL, 0 },
-		{ "disk-usage", cmd_filesystem_disk_usage,
-			cmd_filesystem_disk_usage_usage, NULL, 0 },
+		{ "usage", cmd_filesystem_usage,
+			cmd_filesystem_usage_usage, NULL, 0 },
 
 		NULL_CMD_STRUCT
 	}
