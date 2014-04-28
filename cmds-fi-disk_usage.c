@@ -33,18 +33,13 @@
 
 /*
  * Pretty print the size
- * PAY ATTENTION: it return a statically buffer
  */
 char *df_pretty_sizes(u64 size, int mode)
 {
-	static char buf[30];
-
 	if (mode & DF_HUMAN_UNIT)
-		(void)pretty_size_snprintf(size, buf, sizeof(buf));
+		return pretty_size_mode(size, UNITS_HUMAN);
 	else
-		sprintf(buf, "%llu", size);
-
-	return buf;
+		return pretty_size_mode(size, UNITS_RAW);
 }
 
 /*
