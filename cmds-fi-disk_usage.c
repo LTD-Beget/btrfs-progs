@@ -32,17 +32,6 @@
 #include "version.h"
 
 /*
- * Pretty print the size
- */
-char *df_pretty_sizes(u64 size, int mode)
-{
-	if (mode & DF_HUMAN_UNIT)
-		return pretty_size_mode(size, UNITS_HUMAN);
-	else
-		return pretty_size_mode(size, UNITS_RAW);
-}
-
-/*
  * Add the chunk info to the chunk_info list
  */
 static int add_info_to_list(struct chunk_info **info_ptr,
@@ -389,7 +378,7 @@ static int print_filesystem_usage_overall(int fd, struct chunk_info *chunkinfo,
 
 	K = ((double)total_used + (double)total_free) /	(double)total_chunks;
 
-	if (mode & DF_HUMAN_UNIT)
+	if (mode == UNITS_HUMAN)
 		width = 10;
 	else
 		width = 18;
@@ -397,22 +386,22 @@ static int print_filesystem_usage_overall(int fd, struct chunk_info *chunkinfo,
 	printf("Overall:\n");
 
 	printf("    Device size:\t\t%*s\n", width,
-		df_pretty_sizes(total_disk, mode));
+		pretty_size_mode(total_disk, mode));
 	printf("    Device allocated:\t\t%*s\n", width,
-		df_pretty_sizes(total_chunks, mode));
+		pretty_size_mode(total_chunks, mode));
 	printf("    Device unallocated:\t\t%*s\n", width,
-		df_pretty_sizes(total_disk-total_chunks, mode));
+		pretty_size_mode(total_disk - total_chunks, mode));
 	printf("    Used:\t\t\t%*s\n", width,
-		df_pretty_sizes(total_used, mode));
+		pretty_size_mode(total_used, mode));
 	printf("    Free (Estimated):\t\t%*s\t(",
 		width,
-		df_pretty_sizes((u64)(K*total_disk-total_used), mode));
+		pretty_size_mode((u64)(K * total_disk - total_used), mode));
 	printf("Max: %s, ",
-		df_pretty_sizes(total_disk-total_chunks+total_free, mode));
+		pretty_size_mode(total_disk - total_chunks + total_free, mode));
 	printf("min: %s)\n",
-		df_pretty_sizes((total_disk-total_chunks)/2+total_free, mode));
+		pretty_size_mode((total_disk-total_chunks) / 2 + total_free, mode));
 	printf("    Data to device ratio:\t%*.0f %%\n",
-		width-2, K*100);
+		width - 2, K * 100);
 
 exit:
 
@@ -612,7 +601,7 @@ static void _cmd_filesystem_usage_tabular(int mode,
 
 			if (size)
 				table_printf(matrix, col, i+3,
-					">%s", df_pretty_sizes(size, mode));
+					">%s", pretty_size_mode(size, mode));
 			else
 				table_printf(matrix, col, i+3, ">-");
 
@@ -624,7 +613,7 @@ static void _cmd_filesystem_usage_tabular(int mode,
 				- total_allocated;
 
 		table_printf(matrix, sargs->total_spaces + 1, i + 3,
-			       ">%s", df_pretty_sizes(unused, mode));
+			       ">%s", pretty_size_mode(unused, mode));
 		total_unused += unused;
 
 	}
@@ -636,15 +625,15 @@ static void _cmd_filesystem_usage_tabular(int mode,
 	table_printf(matrix, 0, device_info_count + 4, "<Total");
 	for (i = 0; i < sargs->total_spaces; i++)
 		table_printf(matrix, 1 + i, device_info_count + 4, ">%s",
-			df_pretty_sizes(sargs->spaces[i].total_bytes, mode));
+			pretty_size_mode(sargs->spaces[i].total_bytes, mode));
 
 	table_printf(matrix, sargs->total_spaces + 1, device_info_count + 4,
-			">%s", df_pretty_sizes(total_unused, mode));
+			">%s", pretty_size_mode(total_unused, mode));
 
 	table_printf(matrix, 0, device_info_count + 5, "<Used");
 	for (i = 0; i < sargs->total_spaces; i++)
 		table_printf(matrix, 1 + i, device_info_count+5, ">%s",
-			df_pretty_sizes(sargs->spaces[i].used_bytes, mode));
+			pretty_size_mode(sargs->spaces[i].used_bytes, mode));
 
 	table_dump(matrix);
 	table_free(matrix);
@@ -670,7 +659,7 @@ static void print_unused(struct chunk_info *info_ptr,
 
 		printf("   %s\t%10s\n",
 			device_info_ptr[i].path,
-			df_pretty_sizes(device_info_ptr[i].size - total, mode));
+			pretty_size_mode(device_info_ptr[i].size - total, mode));
 	}
 }
 
@@ -704,7 +693,7 @@ static void print_chunk_device(u64 chunk_type,
 		if (total > 0)
 			printf("   %s\t%10s\n",
 				device_info_ptr[i].path,
-				df_pretty_sizes(total, mode));
+				pretty_size_mode(total, mode));
 	}
 }
 
@@ -732,10 +721,10 @@ static void _cmd_filesystem_usage_linear(int mode,
 		printf("%s,%s: Size:%s, ",
 			description,
 			r_mode,
-			df_pretty_sizes(sargs->spaces[i].total_bytes ,
+			pretty_size_mode(sargs->spaces[i].total_bytes,
 			    mode));
 		printf("Used:%s\n",
-			df_pretty_sizes(sargs->spaces[i].used_bytes, mode));
+			pretty_size_mode(sargs->spaces[i].used_bytes, mode));
 		print_chunk_device(flags, info_ptr, info_count,
 				device_info_ptr, device_info_count, mode);
 		printf("\n");
@@ -787,7 +776,7 @@ const char * const cmd_filesystem_usage_usage[] = {
 
 int cmd_filesystem_usage(int argc, char **argv)
 {
-	int	flags =	DF_HUMAN_UNIT;
+	int mode = UNITS_HUMAN;
 	int	i, more_than_one = 0;
 	int	tabular = 0;
 
@@ -800,7 +789,7 @@ int cmd_filesystem_usage(int argc, char **argv)
 
 		switch (c) {
 		case 'b':
-			flags &= ~DF_HUMAN_UNIT;
+			mode = UNITS_RAW;
 			break;
 		case 't':
 			tabular = 1;
@@ -837,12 +826,12 @@ int cmd_filesystem_usage(int argc, char **argv)
 			goto cleanup;
 
 		ret = print_filesystem_usage_overall(fd, chunkinfo, chunkcount,
-				devinfo, devcount, argv[i], flags);
+				devinfo, devcount, argv[i], mode);
 		if (ret)
 			goto cleanup;
 		printf("\n");
 		ret = print_filesystem_usage_by_chunk(fd, chunkinfo, chunkcount,
-				devinfo, devcount, argv[i], flags, tabular);
+				devinfo, devcount, argv[i], mode, tabular);
 cleanup:
 		close_file_or_dir(fd, dirstream);
 		free(chunkinfo);
@@ -881,22 +870,22 @@ void print_device_chunks(int fd, struct device_info *devinfo,
 			description,
 			r_mode,
 			(int)(20 - strlen(description) - strlen(r_mode)), "",
-			df_pretty_sizes(size, mode));
+			pretty_size_mode(size, mode));
 
 		allocated += size;
 
 	}
 	printf("   Unallocated: %*s%10s\n",
 		(int)(20 - strlen("Unallocated")), "",
-		df_pretty_sizes(devinfo->size - allocated, mode));
+		pretty_size_mode(devinfo->size - allocated, mode));
 }
 
 void print_device_sizes(int fd, struct device_info *devinfo, int mode)
 {
 	printf("   Device size: %*s%10s\n",
 		(int)(20 - strlen("Device size")), "",
-		df_pretty_sizes(devinfo->device_size, mode));
+		pretty_size_mode(devinfo->device_size, mode));
 	printf("   FS occupied: %*s%10s\n",
 		(int)(20 - strlen("FS occupied")), "",
-		df_pretty_sizes(devinfo->size, mode));
+		pretty_size_mode(devinfo->size, mode));
 }
