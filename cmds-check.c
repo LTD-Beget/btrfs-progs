@@ -2454,6 +2454,7 @@ static int try_to_fix_bad_block(struct btrfs_trans_handle *trans,
 	level = btrfs_header_level(buf);
 	path->lowest_level = level;
 	path->skip_check_block = 1;
+	path->bin_search_presort = 1;
 	if (level)
 		btrfs_node_key_to_cpu(buf, &k1, 0);
 	else
