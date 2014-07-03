@@ -1195,23 +1195,26 @@ int btrfs_read_dev_super(int fd, struct btrfs_super_block *sb, u64 sb_bytenr,
 {
 	u8 fsid[BTRFS_FSID_SIZE];
 	int fsid_is_initialized = 0;
-	struct btrfs_super_block buf;
+	u8 data[BTRFS_SUPER_INFO_SIZE];
+	struct btrfs_super_block *buf = (struct btrfs_super_block *) data;
 	int i;
 	int ret;
 	int max_super = super_recover ? BTRFS_SUPER_MIRROR_MAX : 1;
 	u64 transid = 0;
 	u64 bytenr;
+	u32 crc;
+	char crc_result[BTRFS_CSUM_SIZE];
 
 	if (sb_bytenr != BTRFS_SUPER_INFO_OFFSET) {
-		ret = pread64(fd, &buf, sizeof(buf), sb_bytenr);
-		if (ret < sizeof(buf))
+		ret = pread64(fd, data, sizeof(data), sb_bytenr);
+		if (ret < sizeof(data))
 			return -1;
 
-		if (btrfs_super_bytenr(&buf) != sb_bytenr ||
-		    btrfs_super_magic(&buf) != BTRFS_MAGIC)
+		if (btrfs_super_bytenr(buf) != sb_bytenr ||
+		    btrfs_super_magic(buf) != BTRFS_MAGIC)
 			return -1;
 
-		memcpy(sb, &buf, sizeof(*sb));
+		memcpy(sb, data, sizeof(data));
 		return 0;
 	}
 
@@ -1224,22 +1227,31 @@ int btrfs_read_dev_super(int fd, struct btrfs_super_block *sb, u64 sb_bytenr,
 
 	for (i = 0; i < max_super; i++) {
 		bytenr = btrfs_sb_offset(i);
-		ret = pread64(fd, &buf, sizeof(buf), bytenr);
-		if (ret < sizeof(buf))
+		ret = pread64(fd, data, sizeof(data), bytenr);
+		if (ret < sizeof(data))
 			break;
 
-		if (btrfs_super_bytenr(&buf) != bytenr )
+		if (btrfs_super_bytenr(buf) != bytenr)
 			continue;
-		/* if magic is NULL, the device was removed */
-		if (btrfs_super_magic(&buf) == 0 && i == 0)
+		/* if first super block is not btrfs, the device was removed */
+		if (btrfs_super_magic(buf) != BTRFS_MAGIC && i == 0)
 			return -1;
-		if (btrfs_super_magic(&buf) != BTRFS_MAGIC)
+		if (btrfs_super_magic(buf) != BTRFS_MAGIC)
+			continue;
+
+		/* check if the superblock is damaged */
+		crc = ~(u32)0;
+		crc = btrfs_csum_data(NULL, (char *)buf + BTRFS_CSUM_SIZE,
+				      crc, BTRFS_SUPER_INFO_SIZE -
+				      BTRFS_CSUM_SIZE);
+		btrfs_csum_final(crc, crc_result);
+		if (memcmp(crc_result, buf, btrfs_super_csum_size(buf)))
 			continue;
 
 		if (!fsid_is_initialized) {
-			memcpy(fsid, buf.fsid, sizeof(fsid));
+			memcpy(fsid, buf->fsid, sizeof(fsid));
 			fsid_is_initialized = 1;
-		} else if (memcmp(fsid, buf.fsid, sizeof(fsid))) {
+		} else if (memcmp(fsid, buf->fsid, sizeof(fsid))) {
 			/*
 			 * the superblocks (the original one and
 			 * its backups) contain data of different
@@ -1248,9 +1260,9 @@ int btrfs_read_dev_super(int fd, struct btrfs_super_block *sb, u64 sb_bytenr,
 			continue;
 		}
 
-		if (btrfs_super_generation(&buf) > transid) {
-			memcpy(sb, &buf, sizeof(*sb));
-			transid = btrfs_super_generation(&buf);
+		if (btrfs_super_generation(buf) > transid) {
+			memcpy(sb, data, sizeof(data));
+			transid = btrfs_super_generation(buf);
 		}
 	}
 
