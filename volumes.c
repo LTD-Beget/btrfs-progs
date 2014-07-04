@@ -253,10 +253,8 @@ int btrfs_scan_one_device(int fd, const char *path,
 	}
 	disk_super = (struct btrfs_super_block *)buf;
 	ret = btrfs_read_dev_super(fd, disk_super, super_offset, super_recover);
-	if (ret < 0) {
-		ret = -EIO;
+	if (ret < 0)
 		goto error_brelse;
-	}
 	devid = btrfs_stack_device_id(&disk_super->dev_item);
 	if (btrfs_super_flags(disk_super) & BTRFS_SUPER_FLAG_METADUMP)
 		*total_devs = 1;

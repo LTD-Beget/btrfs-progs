@@ -1870,7 +1870,10 @@ int get_fs_info(char *path, struct btrfs_ioctl_fs_info_args *fi_args,
 		ret = btrfs_read_dev_super(fd, disk_super,
 					   BTRFS_SUPER_INFO_OFFSET, 0);
 		if (ret < 0) {
-			ret = -EIO;
+			if (ret == -ENOENT)
+				fprintf(stderr, "No valid btrfs found\n");
+			if (ret == -EIO)
+				fprintf(stderr, "Superblock is corrupted\n");
 			goto out;
 		}
 		devid = btrfs_stack_device_id(&disk_super->dev_item);

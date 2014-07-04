@@ -609,8 +609,13 @@ static int cmd_show(int argc, char **argv)
 				} else {
 					ret = dev_to_fsid(search, fsid);
 					if (ret) {
-						fprintf(stderr,
+						if (ret == -ENOENT)
+							fprintf(stderr,
 							"ERROR: No btrfs on %s\n",
+							search);
+						if (ret == -EIO)
+							fprintf(stderr,
+							"Superblock is corrupted on %s\n",
 							search);
 						return 1;
 					}
