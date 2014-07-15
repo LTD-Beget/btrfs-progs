@@ -1205,7 +1205,7 @@ int btrfs_read_dev_super(int fd, struct btrfs_super_block *sb, u64 sb_bytenr,
 	u8 data[BTRFS_SUPER_INFO_SIZE];
 	struct btrfs_super_block *buf = (struct btrfs_super_block *) data;
 	int i;
-	int ret;
+	int ret = -ENOENT;
 	int max_super = super_recover ? BTRFS_SUPER_MIRROR_MAX : 1;
 	u64 transid = 0;
 	u64 bytenr;
