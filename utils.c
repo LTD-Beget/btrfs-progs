@@ -680,6 +680,35 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 	return 0;
 }
 
+static void wipe_existing_fs(int fd)
+{
+	blkid_probe pr = NULL;
+
+	pr = blkid_new_probe();
+	if (!pr)
+		return;
+
+	if (blkid_probe_set_device(pr, fd, 0, 0))
+		goto out;
+
+	blkid_probe_enable_superblocks(pr, 1);
+	blkid_probe_set_superblocks_flags(pr,
+				BLKID_SUBLKS_MAGIC |
+				BLKID_SUBLKS_TYPE |
+				BLKID_SUBLKS_USAGE |
+				BLKID_SUBLKS_LABEL |
+				BLKID_SUBLKS_UUID);
+
+	blkid_probe_enable_partitions(pr, 1);
+
+	while (blkid_do_probe(pr) == 0)
+		blkid_do_wipe(pr, 0);
+
+	fsync(fd);
+out:
+	blkid_free_probe(pr);
+}
+
 int btrfs_prepare_device(int fd, char *file, int zero_end, u64 *block_count_ret,
 			   u64 max_block_count, int *mixed, int discard)
 {
@@ -730,6 +759,8 @@ int btrfs_prepare_device(int fd, char *file, int zero_end, u64 *block_count_ret,
 			file, strerror(-ret));
 		return 1;
 	}
+
+	wipe_existing_fs(fd);
 
 	*block_count_ret = block_count;
 	return 0;
