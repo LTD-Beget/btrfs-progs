@@ -5016,14 +5016,16 @@ static int verify_backrefs(struct btrfs_trans_handle *trans,
 		return 0;
 
 	list_for_each_entry(back, &rec->backrefs, list) {
+		if (back->full_backref || !back->is_data)
+			continue;
+
 		dback = (struct data_backref *)back;
+
 		/*
 		 * We only pay attention to backrefs that we found a real
 		 * backref for.
 		 */
 		if (dback->found_ref == 0)
-			continue;
-		if (back->full_backref)
 			continue;
 
 		/*
@@ -5140,6 +5142,9 @@ static int verify_backrefs(struct btrfs_trans_handle *trans,
 	 * references and fix up the ones that don't match.
 	 */
 	list_for_each_entry(back, &rec->backrefs, list) {
+		if (back->full_backref || !back->is_data)
+			continue;
+
 		dback = (struct data_backref *)back;
 
 		/*
@@ -5147,8 +5152,6 @@ static int verify_backrefs(struct btrfs_trans_handle *trans,
 		 * to them.
 		 */
 		if (dback->found_ref == 0)
-			continue;
-		if (back->full_backref)
 			continue;
 
 		if (dback->bytes == best->bytes &&
@@ -5369,14 +5372,16 @@ static int find_possible_backrefs(struct btrfs_trans_handle *trans,
 	int ret;
 
 	list_for_each_entry(back, &rec->backrefs, list) {
+		/* Don't care about full backrefs (poor unloved backrefs) */
+		if (back->full_backref || !back->is_data)
+			continue;
+
 		dback = (struct data_backref *)back;
 
 		/* We found this one, we don't need to do a lookup */
 		if (dback->found_ref)
 			continue;
-		/* Don't care about full backrefs (poor unloved backrefs) */
-		if (back->full_backref)
-			continue;
+
 		key.objectid = dback->root;
 		key.type = BTRFS_ROOT_ITEM_KEY;
 		key.offset = (u64)-1;
