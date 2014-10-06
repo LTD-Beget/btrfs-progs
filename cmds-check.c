@@ -55,6 +55,7 @@ static int repair = 0;
 static int no_holes = 0;
 static int init_extent_tree = 0;
 static int check_data_csum = 0;
+static int verbose = 0;
 
 struct extent_backref {
 	struct list_head list;
@@ -6750,6 +6751,7 @@ const char * const cmd_check_usage[] = {
 	"--check-data-csum           verify checkums of data blocks",
 	"--qgroup-report             print a report on qgroup consistency",
 	"--subvol-extents            print subvolume extents and sharing state",
+	"--verbose                   increase verbosity level",
 	NULL
 };
 
@@ -6771,7 +6773,7 @@ int cmd_check(int argc, char **argv)
 
 	while(1) {
 		int c;
-		c = getopt_long(argc, argv, "as:b", long_options,
+		c = getopt_long(argc, argv, "as:bv", long_options,
 				&option_index);
 		if (c < 0)
 			break;
@@ -6797,6 +6799,9 @@ int cmd_check(int argc, char **argv)
 				break;
 			case 'E':
 				subvolid = arg_strtou64(optarg);
+				break;
+			case 'v':
+				verbose++;
 				break;
 			case '?':
 			case 'h':

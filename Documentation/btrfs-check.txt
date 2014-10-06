@@ -32,6 +32,8 @@ create a new CRC tree.
 create a new extent tree.
 --check-data-csum::
 verify checkums of data blocks.
+--verbose::
+increase verbosity level.
 
 EXIT STATUS
 -----------
