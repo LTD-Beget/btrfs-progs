@@ -55,6 +55,7 @@ static int repair = 0;
 static int no_holes = 0;
 static int init_extent_tree = 0;
 static int check_data_csum = 0;
+static int verbose = 0;
 
 struct extent_backref {
 	struct list_head list;
@@ -1335,6 +1336,56 @@ static void reada_walk_down(struct btrfs_root *root,
 	}
 }
 
+/*
+ * Check the child node/leaf by the following condition:
+ * 1. the first item key of the node/leaf should be the same with the one
+ *    in parent.
+ * 2. block in parent node should match the child node/leaf.
+ * 3. generation of parent node and child's header should be consistent.
+ *
+ * Or the child node/leaf pointed by the key in parent is not valid.
+ *
+ * We hope to check leaf owner too, but since subvol may share leaves,
+ * which makes leaf owner check not so strong, key check should be
+ * sufficient enough for that case.
+ */
+static int check_child_node(struct btrfs_root *root,
+			    struct extent_buffer *parent, int slot,
+			    struct extent_buffer *child)
+{
+	struct btrfs_key parent_key;
+	struct btrfs_key child_key;
+	int ret = 0;
+
+	btrfs_node_key_to_cpu(parent, &parent_key, slot);
+	if (btrfs_header_level(child) == 0)
+		btrfs_item_key_to_cpu(child, &child_key, 0);
+	else
+		btrfs_node_key_to_cpu(child, &child_key, 0);
+
+	if (memcmp(&parent_key, &child_key, sizeof(parent_key))) {
+		ret = -EINVAL;
+		fprintf(stderr,
+			"Wrong key of child node/leaf, wanted: (%llu, %u, %llu), have: (%llu, %u, %llu)\n",
+			parent_key.objectid, parent_key.type, parent_key.offset,
+			child_key.objectid, child_key.type, child_key.offset);
+	}
+	if (btrfs_header_bytenr(child) != btrfs_node_blockptr(parent, slot)) {
+		ret = -EINVAL;
+		fprintf(stderr, "Wrong block of child node/leaf, wanted: %llu, have: %llu\n",
+			btrfs_node_blockptr(parent, slot),
+			btrfs_header_bytenr(child));
+	}
+	if (btrfs_node_ptr_generation(parent, slot) !=
+	    btrfs_header_generation(child)) {
+		ret = -EINVAL;
+		fprintf(stderr, "Wrong generation of child node/leaf, wanted: %llu, have: %llu\n",
+			btrfs_header_generation(child),
+			btrfs_node_ptr_generation(parent, slot));
+	}
+	return ret;
+}
+
 static int walk_down_tree(struct btrfs_root *root, struct btrfs_path *path,
 			  struct walk_control *wc, int *level)
 {
@@ -1410,6 +1461,11 @@ static int walk_down_tree(struct btrfs_root *root, struct btrfs_path *path,
 			}
 		}
 
+		ret = check_child_node(root, cur, path->slots[*level], next);
+		if (ret) {
+			err = ret;
+			goto out;
+		}
 		*level = *level - 1;
 		free_extent_buffer(path->nodes[*level]);
 		path->nodes[*level] = next;
@@ -6634,6 +6690,98 @@ static int zero_log_tree(struct btrfs_root *root)
 	return ret;
 }
 
+static int populate_csum(struct btrfs_trans_handle *trans,
+			 struct btrfs_root *csum_root, char *buf, u64 start,
+			 u64 len)
+{
+	u64 offset = 0;
+	u64 sectorsize;
+	int ret = 0;
+
+	while (offset < len) {
+		sectorsize = csum_root->sectorsize;
+		ret = read_extent_data(csum_root, buf, start + offset,
+				       &sectorsize, 0);
+		if (ret)
+			break;
+		ret = btrfs_csum_file_block(trans, csum_root, start + len,
+					    start + offset, buf, sectorsize);
+		if (ret)
+			break;
+		offset += sectorsize;
+	}
+	return ret;
+}
+
+static int fill_csum_tree(struct btrfs_trans_handle *trans,
+			  struct btrfs_root *csum_root)
+{
+	struct btrfs_root *extent_root = csum_root->fs_info->extent_root;
+	struct btrfs_path *path;
+	struct btrfs_extent_item *ei;
+	struct extent_buffer *leaf;
+	char *buf;
+	struct btrfs_key key;
+	int ret;
+
+	path = btrfs_alloc_path();
+	if (!path)
+		return -ENOMEM;
+
+	key.objectid = 0;
+	key.type = BTRFS_EXTENT_ITEM_KEY;
+	key.offset = 0;
+
+	ret = btrfs_search_slot(NULL, extent_root, &key, path, 0, 0);
+	if (ret < 0) {
+		btrfs_free_path(path);
+		return ret;
+	}
+
+	buf = malloc(csum_root->sectorsize);
+	if (!buf) {
+		btrfs_free_path(path);
+		return -ENOMEM;
+	}
+
+	while (1) {
+		if (path->slots[0] >= btrfs_header_nritems(path->nodes[0])) {
+			ret = btrfs_next_leaf(extent_root, path);
+			if (ret < 0)
+				break;
+			if (ret) {
+				ret = 0;
+				break;
+			}
+		}
+		leaf = path->nodes[0];
+
+		btrfs_item_key_to_cpu(leaf, &key, path->slots[0]);
+		if (key.type != BTRFS_EXTENT_ITEM_KEY) {
+			path->slots[0]++;
+			continue;
+		}
+
+		ei = btrfs_item_ptr(leaf, path->slots[0],
+				    struct btrfs_extent_item);
+		if (!(btrfs_extent_flags(leaf, ei) &
+		      BTRFS_EXTENT_FLAG_DATA)) {
+			path->slots[0]++;
+			continue;
+		}
+
+		ret = populate_csum(trans, csum_root, buf, key.objectid,
+				    key.offset);
+		if (ret)
+			break;
+		path->slots[0]++;
+	}
+
+	btrfs_free_path(path);
+	free(buf);
+	return ret;
+}
+
 static struct option long_options[] = {
 	{ "super", 1, NULL, 's' },
 	{ "repair", 0, NULL, 0 },
@@ -6658,6 +6806,7 @@ const char * const cmd_check_usage[] = {
 	"--check-data-csum           verify checkums of data blocks",
 	"--qgroup-report             print a report on qgroup consistency",
 	"--subvol-extents            print subvolume extents and sharing state",
+	"--verbose                   increase verbosity level",
 	NULL
 };
 
@@ -6679,7 +6828,7 @@ int cmd_check(int argc, char **argv)
 
 	while(1) {
 		int c;
-		c = getopt_long(argc, argv, "as:b", long_options,
+		c = getopt_long(argc, argv, "as:bv", long_options,
 				&option_index);
 		if (c < 0)
 			break;
@@ -6705,6 +6854,9 @@ int cmd_check(int argc, char **argv)
 				break;
 			case 'E':
 				subvolid = arg_strtou64(optarg);
+				break;
+			case 'v':
+				verbose++;
 				break;
 			case '?':
 			case 'h':
@@ -6819,6 +6971,12 @@ int cmd_check(int argc, char **argv)
 				fprintf(stderr, "crc root initialization failed\n");
 				ret = -EIO;
 				goto close_out;
+			}
+
+			ret = fill_csum_tree(trans, info->csum_root);
+			if (ret) {
+				fprintf(stderr, "crc refilling failed\n");
+				return -EIO;
 			}
 		}
 		/*
