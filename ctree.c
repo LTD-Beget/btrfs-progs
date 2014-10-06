@@ -388,6 +388,17 @@ int btrfs_comp_cpu_keys(struct btrfs_key *k1, struct btrfs_key *k2)
 	return 0;
 }
 
+int btrfs_comp_disk_keys(struct btrfs_disk_key *dk1,
+			 struct btrfs_disk_key *dk2)
+{
+	struct btrfs_key k1, k2;
+
+	btrfs_disk_key_to_cpu(&k1, dk1);
+	btrfs_disk_key_to_cpu(&k2, dk2);
+
+	return btrfs_comp_cpu_keys(&k1, &k2);
+}
+
 /*
  * compare two keys in a memcmp fashion
  */
@@ -598,25 +609,78 @@ static int generic_bin_search(struct extent_buffer *eb, unsigned long p,
 	return 1;
 }
 
+static int cmp_disk_keys(const void *k1, const void *k2)
+{
+	return btrfs_comp_disk_keys((struct btrfs_disk_key *)k1, (struct btrfs_disk_key *)k2);
+}
+
+/*
+ * Copy the item keys and their original positions into a second
+ * extent buffer, which can be safely passed to generic_bin_search in
+ * the case where the keys might be out of order.
+ */
+static void sort_key_copy(struct extent_buffer *tgt, struct extent_buffer *src,
+			  int offset, int item_size, int nitems)
+{
+	struct btrfs_disk_key *src_item;
+	struct btrfs_item *tgt_item;
+	int i;
+
+	for (i = 0; i < nitems; i++) {
+		/*
+		 * We abuse the struct btrfs_item slightly here: the key
+		 * is the key we care about; the offset field is the
+		 * original slot number
+		 */
+		src_item = (struct btrfs_disk_key *)(src->data + offset + i*item_size);
+		tgt_item = (struct btrfs_item *)(tgt->data + i*sizeof(struct btrfs_item));
+		memcpy(tgt_item, src_item, sizeof(struct btrfs_disk_key));
+		tgt_item->offset = i;
+	}
+	qsort(tgt->data, nitems, sizeof(struct btrfs_item), cmp_disk_keys);
+}
+
 /*
  * simple bin_search frontend that does the right thing for
  * leaves vs nodes
  */
 static int bin_search(struct extent_buffer *eb, struct btrfs_key *key,
-		      int level, int *slot)
+		      int level, int pre_sort, int *slot)
 {
-	if (level == 0)
-		return generic_bin_search(eb,
-					  offsetof(struct btrfs_leaf, items),
-					  sizeof(struct btrfs_item),
-					  key, btrfs_header_nritems(eb),
-					  slot);
-	else
-		return generic_bin_search(eb,
-					  offsetof(struct btrfs_node, ptrs),
-					  sizeof(struct btrfs_key_ptr),
-					  key, btrfs_header_nritems(eb),
-					  slot);
+	struct extent_buffer *sorted = NULL;
+	int ret;
+	int offset, size, nritems;
+
+	if (level == 0) {
+		offset = offsetof(struct btrfs_leaf, items);
+		size = sizeof(struct btrfs_item);
+	} else {
+		offset = offsetof(struct btrfs_node, ptrs);
+		size = sizeof(struct btrfs_key_ptr);
+	}
+	nritems = btrfs_header_nritems(eb);
+
+	if (pre_sort) {
+		sorted = alloc_extent_buffer(eb->tree, eb->dev_bytenr, eb->len);
+		sort_key_copy(sorted, eb, offset, size, nritems);
+		offset = 0;
+		size = sizeof(struct btrfs_item);
+		eb = sorted;
+	}
+
+	ret = generic_bin_search(eb, offset, size, key, nritems, slot);
+
+	if (pre_sort) {
+		/*
+		 * We have the sorted slot number, which is probably unhelpful
+		 * if the sort changed the order. So, return the original slot
+		 * number, not the sorted position.
+		 */
+		*slot = ((struct btrfs_item *)(eb->data + (*slot)*size))->offset;
+		free_extent_buffer(sorted);
+	}
+
+	return ret;
 }
 
 struct extent_buffer *read_node_slot(struct btrfs_root *root,
@@ -1075,7 +1139,7 @@ again:
 		ret = check_block(root, p, level);
 		if (ret)
 			return -1;
-		ret = bin_search(b, key, level, &slot);
+		ret = bin_search(b, key, level, p->bin_search_presort, &slot);
 		if (level != 0) {
 			if (ret && slot > 0)
 				slot -= 1;
