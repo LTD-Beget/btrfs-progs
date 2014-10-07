@@ -307,8 +307,22 @@ static struct inode_record *clone_inode_rec(struct inode_record *orig_rec)
 	return rec;
 }
 
-static void print_inode_error(int errors)
+static void print_inode_error(struct btrfs_root *root, struct inode_record *rec)
 {
+	u64 root_objectid = root->root_key.objectid;
+	int errors = rec->errors;
+
+	if (!errors)
+		return;
+	/* reloc root errors, we print its corresponding fs root objectid*/
+	if (root_objectid == BTRFS_TREE_RELOC_OBJECTID) {
+		root_objectid = root->root_key.offset;
+		fprintf(stderr, "reloc");
+	}
+	fprintf(stderr, "root %llu inode %llu errors %x",
+		(unsigned long long) root_objectid,
+		(unsigned long long) rec->ino, rec->errors);
+
 	if (errors & I_ERR_NO_INODE_ITEM)
 		fprintf(stderr, ", no inode item");
 	if (errors & I_ERR_NO_ORPHAN_ITEM)
@@ -891,7 +905,8 @@ static int is_child_root(struct btrfs_root *root, u64 parent_root_id,
 	key.offset = child_root_id;
 	ret = btrfs_search_slot(NULL, root->fs_info->tree_root, &key, &path,
 				0, 0);
-	BUG_ON(ret < 0);
+	if (ret < 0)
+		return ret;
 	btrfs_release_path(&path);
 	if (!ret)
 		return 1;
@@ -901,15 +916,14 @@ static int is_child_root(struct btrfs_root *root, u64 parent_root_id,
 	key.offset = 0;
 	ret = btrfs_search_slot(NULL, root->fs_info->tree_root, &key, &path,
 				0, 0);
-	BUG_ON(ret <= 0);
+	if (ret < 0)
+		goto out;
 
 	while (1) {
 		leaf = path.nodes[0];
 		if (path.slots[0] >= btrfs_header_nritems(leaf)) {
 			ret = btrfs_next_leaf(root->fs_info->tree_root, &path);
-			BUG_ON(ret < 0);
-
-			if (ret > 0)
+			if (ret)
 				break;
 			leaf = path.nodes[0];
 		}
@@ -928,8 +942,10 @@ static int is_child_root(struct btrfs_root *root, u64 parent_root_id,
 
 		path.slots[0]++;
 	}
-
+out:
 	btrfs_release_path(&path);
+	if (ret < 0)
+		return ret;
 	return has_parent? 0 : -1;
 }
 
@@ -1082,14 +1098,15 @@ static int process_inode_extref(struct extent_buffer *eb,
 
 }
 
-static u64 count_csum_range(struct btrfs_root *root, u64 start, u64 len)
+static int count_csum_range(struct btrfs_root *root, u64 start,
+			    u64 len, u64 *found)
 {
 	struct btrfs_key key;
 	struct btrfs_path path;
 	struct extent_buffer *leaf;
-	int ret ;
+	int ret;
 	size_t size;
-	u64 found = 0;
+	*found = 0;
 	u64 csum_end;
 	u16 csum_size = btrfs_super_csum_size(root->fs_info->super_copy);
 
@@ -1101,7 +1118,8 @@ static u64 count_csum_range(struct btrfs_root *root, u64 start, u64 len)
 
 	ret = btrfs_search_slot(NULL, root->fs_info->csum_root,
 				&key, &path, 0, 0);
-	BUG_ON(ret < 0);
+	if (ret < 0)
+		goto out;
 	if (ret > 0 && path.slots[0] > 0) {
 		leaf = path.nodes[0];
 		btrfs_item_key_to_cpu(leaf, &key, path.slots[0] - 1);
@@ -1114,9 +1132,10 @@ static u64 count_csum_range(struct btrfs_root *root, u64 start, u64 len)
 		leaf = path.nodes[0];
 		if (path.slots[0] >= btrfs_header_nritems(leaf)) {
 			ret = btrfs_next_leaf(root->fs_info->csum_root, &path);
-			BUG_ON(ret < 0);
 			if (ret > 0)
 				break;
+			else if (ret < 0)
+				goto out;
 			leaf = path.nodes[0];
 		}
 
@@ -1138,13 +1157,16 @@ static u64 count_csum_range(struct btrfs_root *root, u64 start, u64 len)
 			size = min(csum_end - start, len);
 			len -= size;
 			start += size;
-			found += size;
+			*found += size;
 		}
 
 		path.slots[0]++;
 	}
+out:
+	if (ret < 0)
+		return ret;
 	btrfs_release_path(&path);
-	return found;
+	return 0;
 }
 
 static int process_file_extent(struct btrfs_root *root,
@@ -1159,6 +1181,7 @@ static int process_file_extent(struct btrfs_root *root,
 	u64 extent_offset = 0;
 	u64 mask = root->sectorsize - 1;
 	int extent_type;
+	int ret;
 
 	rec = active_node->current;
 	BUG_ON(rec->ino != key->objectid || rec->refs > 1);
@@ -1213,7 +1236,9 @@ static int process_file_extent(struct btrfs_root *root,
 		else
 			disk_bytenr += extent_offset;
 
-		found = count_csum_range(root, disk_bytenr, num_bytes);
+		ret = count_csum_range(root, disk_bytenr, num_bytes, &found);
+		if (ret < 0)
+			return ret;
 		if (extent_type == BTRFS_FILE_EXTENT_REG) {
 			if (found > 0)
 				rec->found_csum_item = 1;
@@ -1234,7 +1259,6 @@ static int process_one_leaf(struct btrfs_root *root, struct extent_buffer *eb,
 	u32 nritems;
 	int i;
 	int ret = 0;
-	int error = 0;
 	struct cache_tree *inode_cache;
 	struct shared_node *active_node;
 
@@ -1284,10 +1308,8 @@ static int process_one_leaf(struct btrfs_root *root, struct extent_buffer *eb,
 		default:
 			break;
 		};
-		if (ret != 0)
-			error = 1;
 	}
-	return error;
+	return ret;
 }
 
 static void reada_walk_down(struct btrfs_root *root,
@@ -1355,6 +1377,8 @@ static int walk_down_tree(struct btrfs_root *root, struct btrfs_path *path,
 			break;
 		if (*level == 0) {
 			ret = process_one_leaf(root, cur, wc);
+			if (ret < 0)
+				err = ret;
 			break;
 		}
 		bytenr = btrfs_node_blockptr(cur, path->slots[*level]);
@@ -1603,10 +1627,7 @@ static int check_inode_recs(struct btrfs_root *root,
 			rec->errors |= I_ERR_NO_INODE_ITEM;
 		if (rec->found_link != rec->nlink)
 			rec->errors |= I_ERR_LINK_COUNT_WRONG;
-		fprintf(stderr, "root %llu inode %llu errors %x",
-			(unsigned long long) root->root_key.objectid,
-			(unsigned long long) rec->ino, rec->errors);
-		print_inode_error(rec->errors);
+		print_inode_error(root, rec);
 		list_for_each_entry(backref, &rec->backrefs, list) {
 			if (!backref->found_dir_item)
 				backref->errors |= REF_ERR_NO_DIR_ITEM;
@@ -1751,6 +1772,7 @@ static int merge_root_recs(struct btrfs_root *root,
 	struct ptr_node *node;
 	struct inode_record *rec;
 	struct inode_backref *backref;
+	int ret = 0;
 
 	if (root->root_key.objectid == BTRFS_TREE_RELOC_OBJECTID) {
 		free_inode_recs_tree(src_cache);
@@ -1766,7 +1788,10 @@ static int merge_root_recs(struct btrfs_root *root,
 		remove_cache_extent(src_cache, &node->cache);
 		free(node);
 
-		if (!is_child_root(root, root->objectid, rec->ino))
+		ret = is_child_root(root, root->objectid, rec->ino);
+		if (ret < 0)
+			break;
+		else if (ret == 0)
 			goto skip;
 
 		list_for_each_entry(backref, &rec->backrefs, list) {
@@ -1787,6 +1812,8 @@ static int merge_root_recs(struct btrfs_root *root,
 skip:
 		free_inode_rec(rec);
 	}
+	if (ret < 0)
+		return ret;
 	return 0;
 }
 
@@ -1945,6 +1972,7 @@ static int check_fs_root(struct btrfs_root *root,
 			 struct walk_control *wc)
 {
 	int ret = 0;
+	int err = 0;
 	int wret;
 	int level;
 	struct btrfs_path path;
@@ -1982,7 +2010,8 @@ static int check_fs_root(struct btrfs_root *root,
 		level = root_item->drop_level;
 		path.lowest_level = level;
 		wret = btrfs_search_slot(NULL, root, &key, &path, 0, 0);
-		BUG_ON(wret < 0);
+		if (wret < 0)
+			goto skip_walking;
 		btrfs_node_key(path.nodes[level], &found_key,
 				path.slots[level]);
 		WARN_ON(memcmp(&found_key, &root_item->drop_progress,
@@ -2002,9 +2031,12 @@ static int check_fs_root(struct btrfs_root *root,
 		if (wret != 0)
 			break;
 	}
+skip_walking:
 	btrfs_release_path(&path);
 
-	merge_root_recs(root, &root_node.root_cache, root_cache);
+	err = merge_root_recs(root, &root_node.root_cache, root_cache);
+	if (err < 0)
+		ret = err;
 
 	if (root_node.current) {
 		root_node.current->checked = 1;
@@ -2012,7 +2044,9 @@ static int check_fs_root(struct btrfs_root *root,
 				root_node.current);
 	}
 
-	ret = check_inode_recs(root, &root_node.inode_cache);
+	err = check_inode_recs(root, &root_node.inode_cache);
+	if (!ret)
+		ret = err;
 	return ret;
 }
 
@@ -2050,20 +2084,32 @@ static int check_fs_roots(struct btrfs_root *root,
 	key.objectid = 0;
 	key.type = BTRFS_ROOT_ITEM_KEY;
 	ret = btrfs_search_slot(NULL, tree_root, &key, &path, 0, 0);
-	BUG_ON(ret < 0);
+	if (ret < 0) {
+		err = 1;
+		goto out;
+	}
 	while (1) {
 		leaf = path.nodes[0];
 		if (path.slots[0] >= btrfs_header_nritems(leaf)) {
 			ret = btrfs_next_leaf(tree_root, &path);
-			if (ret != 0)
+			if (ret) {
+				if (ret < 0)
+					err = 1;
 				break;
+			}
 			leaf = path.nodes[0];
 		}
 		btrfs_item_key_to_cpu(leaf, &key, path.slots[0]);
 		if (key.type == BTRFS_ROOT_ITEM_KEY &&
 		    fs_root_objectid(key.objectid)) {
-			key.offset = (u64)-1;
-			tmp_root = btrfs_read_fs_root(root->fs_info, &key);
+			if (key.objectid == BTRFS_TREE_RELOC_OBJECTID) {
+				tmp_root = btrfs_read_fs_root_no_cache(
+						root->fs_info, &key);
+			} else {
+				key.offset = (u64)-1;
+				tmp_root = btrfs_read_fs_root(
+						root->fs_info, &key);
+			}
 			if (IS_ERR(tmp_root)) {
 				err = 1;
 				goto next;
@@ -2071,6 +2117,8 @@ static int check_fs_roots(struct btrfs_root *root,
 			ret = check_fs_root(tmp_root, root_cache, &wc);
 			if (ret)
 				err = 1;
+			if (key.objectid == BTRFS_TREE_RELOC_OBJECTID)
+				btrfs_free_fs_root(tmp_root);
 		} else if (key.type == BTRFS_ROOT_REF_KEY ||
 			   key.type == BTRFS_ROOT_BACKREF_KEY) {
 			process_root_ref(leaf, path.slots[0], &key,
@@ -2079,8 +2127,10 @@ static int check_fs_roots(struct btrfs_root *root,
 next:
 		path.slots[0]++;
 	}
+out:
 	btrfs_release_path(&path);
-
+	if (err)
+		free_extent_cache_tree(&wc.shared);
 	if (!cache_tree_empty(&wc.shared))
 		fprintf(stderr, "warning line %d\n", __LINE__);
 
@@ -3742,8 +3792,7 @@ static int check_extent_exists(struct btrfs_root *root, u64 bytenr,
 
 	key.objectid = bytenr;
 	key.type = BTRFS_EXTENT_ITEM_KEY;
-	key.offset = 0;
-
+	key.offset = (u64)-1;
 
 again:
 	ret = btrfs_search_slot(NULL, root->fs_info->extent_root, &key, path,
@@ -3753,10 +3802,17 @@ again:
 		btrfs_free_path(path);
 		return ret;
 	} else if (ret) {
-		if (path->slots[0])
+		if (path->slots[0] > 0) {
 			path->slots[0]--;
-		else
-			btrfs_prev_leaf(root, path);
+		} else {
+			ret = btrfs_prev_leaf(root, path);
+			if (ret < 0) {
+				goto out;
+			} else if (ret > 0) {
+				ret = 0;
+				goto out;
+			}
+		}
 	}
 
 	btrfs_item_key_to_cpu(path->nodes[0], &key, path->slots[0]);
@@ -3766,13 +3822,22 @@ again:
 	 * bytenr, so walk back one more just in case.  Dear future traveler,
 	 * first congrats on mastering time travel.  Now if it's not too much
 	 * trouble could you go back to 2006 and tell Chris to make the
-	 * BLOCK_GROUP_ITEM_KEY lower than the EXTENT_ITEM_KEY please?
+	 * BLOCK_GROUP_ITEM_KEY (and BTRFS_*_REF_KEY) lower than the
+	 * EXTENT_ITEM_KEY please?
 	 */
-	if (key.type == BTRFS_BLOCK_GROUP_ITEM_KEY) {
-		if (path->slots[0])
+	while (key.type > BTRFS_EXTENT_ITEM_KEY) {
+		if (path->slots[0] > 0) {
 			path->slots[0]--;
-		else
-			btrfs_prev_leaf(root, path);
+		} else {
+			ret = btrfs_prev_leaf(root, path);
+			if (ret < 0) {
+				goto out;
+			} else if (ret > 0) {
+				ret = 0;
+				goto out;
+			}
+		}
+		btrfs_item_key_to_cpu(path->nodes[0], &key, path->slots[0]);
 	}
 
 	while (num_bytes) {
@@ -3844,7 +3909,8 @@ again:
 	}
 	ret = 0;
 
-	if (num_bytes) {
+out:
+	if (num_bytes && !ret) {
 		fprintf(stderr, "There are no extents for csum range "
 			"%Lu-%Lu\n", bytenr, bytenr+num_bytes);
 		ret = 1;
@@ -5892,7 +5958,8 @@ again:
 	btrfs_set_key_type(&key, BTRFS_ROOT_ITEM_KEY);
 	ret = btrfs_search_slot(NULL, root->fs_info->tree_root,
 					&key, &path, 0, 0);
-	BUG_ON(ret < 0);
+	if (ret < 0)
+		goto out;
 	while(1) {
 		leaf = path.nodes[0];
 		slot = path.slots[0];
@@ -6017,12 +6084,12 @@ again:
 	if (err && !ret)
 		ret = err;
 
+out:
 	if (trans) {
 		err = btrfs_commit_transaction(trans, root);
 		if (!ret)
 			ret = err;
 	}
-out:
 	if (repair) {
 		free_corrupt_blocks_tree(root->fs_info->corrupt_blocks);
 		root->fs_info->fsck_extent_cache = NULL;
@@ -6120,6 +6187,15 @@ static int pin_down_tree_blocks(struct btrfs_fs_info *fs_info,
 	int nritems;
 	int ret;
 	int i;
+
+	/*
+	 * If we have pinned this block before, don't pin it again.
+	 * This can not only avoid forever loop with broken filesystem
+	 * but also give us some speedups.
+	 */
+	if (test_range_bit(&fs_info->pinned_extents, eb->start,
+			   eb->start + eb->len - 1, EXTENT_DIRTY, 0))
+		return 0;
 
 	btrfs_pin_extent(fs_info, eb->start, eb->len);
 
@@ -6542,6 +6618,22 @@ out:
 	return ret;
 }
 
+static int zero_log_tree(struct btrfs_root *root)
+{
+	struct btrfs_trans_handle *trans;
+	int ret;
+
+	trans = btrfs_start_transaction(root, 1);
+	if (IS_ERR(trans)) {
+		ret = PTR_ERR(trans);
+		return ret;
+	}
+	btrfs_set_super_log_root(root->fs_info->super_copy, 0);
+	btrfs_set_super_log_root_level(root->fs_info->super_copy, 0);
+	ret = btrfs_commit_transaction(trans, root);
+	return ret;
+}
+
 static struct option long_options[] = {
 	{ "super", 1, NULL, 's' },
 	{ "repair", 0, NULL, 0 },
@@ -6661,6 +6753,23 @@ int cmd_check(int argc, char **argv)
 	}
 
 	root = info->fs_root;
+	/*
+	 * repair mode will force us to commit transaction which
+	 * will make us fail to load log tree when mounting.
+	 */
+	if (repair && btrfs_super_log_root(info->super_copy)) {
+		ret = ask_user("repair mode will force to clear out log tree, Are you sure?");
+		if (!ret) {
+			ret = 1;
+			goto close_out;
+		}
+		ret = zero_log_tree(root);
+		if (ret) {
+			fprintf(stderr, "fail to zero log tree\n");
+			goto close_out;
+		}
+	}
+
 	uuid_unparse(info->super_copy->fsid, uuidbuf);
 	if (qgroup_report) {
 		printf("Print quota groups for %s\nUUID: %s\n", argv[optind],

@@ -96,7 +96,10 @@ static struct btrfs_root *open_ctree_broken(int fd, const char *device)
 	ret = btrfs_read_dev_super(fs_devices->latest_bdev,
 				   disk_super, fs_info->super_bytenr, 1);
 	if (ret) {
-		printk("No valid btrfs found\n");
+		if (ret == -ENOENT)
+			fprintf(stderr, "No valid btrfs found\n");
+		if (ret == -EIO)
+			fprintf(stderr, "Superblock is corrupted\n");
 		goto out_devices;
 	}
 

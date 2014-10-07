@@ -997,12 +997,16 @@ int btrfs_scan_fs_devices(int fd, const char *path,
 	ret = btrfs_scan_one_device(fd, path, fs_devices,
 				    &total_devs, sb_bytenr, super_recover);
 	if (ret) {
-		fprintf(stderr, "No valid Btrfs found on %s\n", path);
+		if (ret == -ENOENT)
+			fprintf(stderr, "No valid Btrfs found on %s\n", path);
+		if (ret == -EIO)
+			fprintf(stderr, "Superblock is corrupted on %s\n",
+				path);
 		return ret;
 	}
 
 	if (total_devs != 1) {
-		ret = btrfs_scan_for_fsid(run_ioctl);
+		ret = scan_for_btrfs(BTRFS_SCAN_PROC, run_ioctl);
 		if (ret)
 			return ret;
 	}
@@ -1108,7 +1112,10 @@ static struct btrfs_fs_info *__open_ctree_fd(int fp, const char *path,
 	else
 		ret = btrfs_read_dev_super(fp, disk_super, sb_bytenr, 0);
 	if (ret) {
-		printk("No valid btrfs found\n");
+		if (ret == -ENOENT)
+			fprintf(stderr, "No valid btrfs found\n");
+		if (ret == -EIO)
+			fprintf(stderr, "Superblock is corrupted\n");
 		goto out_devices;
 	}
 
@@ -1195,23 +1202,26 @@ int btrfs_read_dev_super(int fd, struct btrfs_super_block *sb, u64 sb_bytenr,
 {
 	u8 fsid[BTRFS_FSID_SIZE];
 	int fsid_is_initialized = 0;
-	struct btrfs_super_block buf;
+	u8 data[BTRFS_SUPER_INFO_SIZE];
+	struct btrfs_super_block *buf = (struct btrfs_super_block *) data;
 	int i;
-	int ret;
+	int ret = -ENOENT;
 	int max_super = super_recover ? BTRFS_SUPER_MIRROR_MAX : 1;
 	u64 transid = 0;
 	u64 bytenr;
+	u32 crc;
+	char crc_result[BTRFS_CSUM_SIZE];
 
 	if (sb_bytenr != BTRFS_SUPER_INFO_OFFSET) {
-		ret = pread64(fd, &buf, sizeof(buf), sb_bytenr);
-		if (ret < sizeof(buf))
-			return -1;
+		ret = pread64(fd, data, sizeof(data), sb_bytenr);
+		if (ret < sizeof(data))
+			return -EIO;
 
-		if (btrfs_super_bytenr(&buf) != sb_bytenr ||
-		    btrfs_super_magic(&buf) != BTRFS_MAGIC)
-			return -1;
+		if (btrfs_super_bytenr(buf) != sb_bytenr ||
+		    btrfs_super_magic(buf) != BTRFS_MAGIC)
+			return -ENOENT;
 
-		memcpy(sb, &buf, sizeof(*sb));
+		memcpy(sb, data, sizeof(data));
 		return 0;
 	}
 
@@ -1224,37 +1234,55 @@ int btrfs_read_dev_super(int fd, struct btrfs_super_block *sb, u64 sb_bytenr,
 
 	for (i = 0; i < max_super; i++) {
 		bytenr = btrfs_sb_offset(i);
-		ret = pread64(fd, &buf, sizeof(buf), bytenr);
-		if (ret < sizeof(buf))
+		ret = pread64(fd, data, sizeof(data), bytenr);
+		if (ret < sizeof(data)) {
+			ret = -EIO;
 			break;
+		}
 
-		if (btrfs_super_bytenr(&buf) != bytenr )
+		if (btrfs_super_bytenr(buf) != bytenr) {
+			ret = -EIO;
 			continue;
-		/* if magic is NULL, the device was removed */
-		if (btrfs_super_magic(&buf) == 0 && i == 0)
-			return -1;
-		if (btrfs_super_magic(&buf) != BTRFS_MAGIC)
+		}
+		/* if first super block is not btrfs, the device was removed */
+		if (btrfs_super_magic(buf) != BTRFS_MAGIC && i == 0)
+			return -ENOENT;
+		if (btrfs_super_magic(buf) != BTRFS_MAGIC) {
+			ret = -ENOENT;
 			continue;
+		}
+
+		/* check if the superblock is damaged */
+		crc = ~(u32)0;
+		crc = btrfs_csum_data(NULL, (char *)buf + BTRFS_CSUM_SIZE,
+				      crc, BTRFS_SUPER_INFO_SIZE -
+				      BTRFS_CSUM_SIZE);
+		btrfs_csum_final(crc, crc_result);
+		if (memcmp(crc_result, buf, btrfs_super_csum_size(buf))) {
+			ret = -EIO;
+			continue;
+		}
 
 		if (!fsid_is_initialized) {
-			memcpy(fsid, buf.fsid, sizeof(fsid));
+			memcpy(fsid, buf->fsid, sizeof(fsid));
 			fsid_is_initialized = 1;
-		} else if (memcmp(fsid, buf.fsid, sizeof(fsid))) {
+		} else if (memcmp(fsid, buf->fsid, sizeof(fsid))) {
 			/*
 			 * the superblocks (the original one and
 			 * its backups) contain data of different
 			 * filesystems -> the super cannot be trusted
 			 */
+			ret = -EIO;
 			continue;
 		}
 
-		if (btrfs_super_generation(&buf) > transid) {
-			memcpy(sb, &buf, sizeof(*sb));
-			transid = btrfs_super_generation(&buf);
+		if (btrfs_super_generation(buf) > transid) {
+			memcpy(sb, data, sizeof(data));
+			transid = btrfs_super_generation(buf);
 		}
 	}
 
-	return transid > 0 ? 0 : -1;
+	return transid > 0 ? 0 : ret;
 }
 
 static int write_dev_supers(struct btrfs_root *root,

@@ -27,9 +27,8 @@
 #define BTRFS_MKFS_SMALL_VOLUME_SIZE (1024 * 1024 * 1024)
 
 #define BTRFS_SCAN_PROC		(1ULL << 0)
-#define BTRFS_SCAN_DEV		(1ULL << 1)
-#define BTRFS_SCAN_MOUNTED	(1ULL << 2)
-#define BTRFS_SCAN_LBLKID	(1ULL << 3)
+#define BTRFS_SCAN_MOUNTED	(1ULL << 1)
+#define BTRFS_SCAN_LBLKID	(1ULL << 2)
 
 #define BTRFS_UPDATE_KERNEL	1
 
@@ -49,6 +48,14 @@ int check_argc_max(int nargs, int expected);
 void fixup_argv0(char **argv, const char *token);
 void set_argv0(char **argv);
 
+/*
+ * Output mode of byte units
+ */
+#define UNITS_RAW			(1)
+#define UNITS_BINARY			(2)
+#define UNITS_DECIMAL			(3)
+#define UNITS_HUMAN			UNITS_BINARY
+
 int make_btrfs(int fd, const char *device, const char *label,
 	       char *fs_uuid, u64 blocks[6], u64 num_bytes, u32 nodesize,
 	       u32 leafsize, u32 sectorsize, u32 stripesize, u64 features);
@@ -62,7 +69,6 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 		      u32 sectorsize);
 int btrfs_scan_for_fsid(int run_ioctls);
 void btrfs_register_one_device(char *fname);
-int btrfs_scan_one_dir(char *dirname, int run_ioctl);
 char *canonicalize_dm_name(const char *ptname);
 char *canonicalize_path(const char *path);
 int check_mounted(const char *devicename);
@@ -71,12 +77,13 @@ int check_mounted_where(int fd, const char *file, char *where, int size,
 int btrfs_device_already_in_root(struct btrfs_root *root, int fd,
 				 int super_offset);
 
-int pretty_size_snprintf(u64 size, char *str, size_t str_bytes);
-#define pretty_size(size) 						\
-	({								\
-		static __thread char _str[24];				\
-		(void)pretty_size_snprintf((size), _str, sizeof(_str));	\
-		_str;							\
+int pretty_size_snprintf(u64 size, char *str, size_t str_bytes, int unit_mode);
+#define pretty_size(size) 	pretty_size_mode(size, UNITS_BINARY)
+#define pretty_size_mode(size, mode) 					      \
+	({								      \
+		static __thread char _str[32];				      \
+		(void)pretty_size_snprintf((size), _str, sizeof(_str), mode); \
+		_str;							      \
 	})
 
 int get_mountpt(char *dev, char *mntpt, size_t size);
@@ -114,6 +121,12 @@ int find_mount_root(const char *path, char **mount_root);
 int get_device_info(int fd, u64 devid,
 		struct btrfs_ioctl_dev_info_args *di_args);
 int test_uuid_unique(char *fs_uuid);
+u64 disk_size(char *path);
+int get_device_info(int fd, u64 devid,
+		struct btrfs_ioctl_dev_info_args *di_args);
+u64 get_partition_size(char *dev);
+const char* group_type_str(u64 flags);
+const char* group_profile_str(u64 flags);
 
 int test_minimum_size(const char *file, u32 leafsize);
 int test_issubvolname(const char *name);

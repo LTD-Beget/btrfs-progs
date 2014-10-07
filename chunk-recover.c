@@ -1283,7 +1283,10 @@ open_ctree_with_broken_chunk(struct recover_control *rc)
 	ret = btrfs_read_dev_super(fs_info->fs_devices->latest_bdev,
 				   disk_super, fs_info->super_bytenr, 1);
 	if (ret) {
-		fprintf(stderr, "No valid btrfs found\n");
+		if (ret == -ENOENT)
+			fprintf(stderr, "No valid btrfs found\n");
+		if (ret == -EIO)
+			fprintf(stderr, "Superblock is corrupted\n");
 		goto out_devices;
 	}
 
@@ -1340,7 +1343,7 @@ static int recover_prepare(struct recover_control *rc, char *path)
 		return -1;
 	}
 
-	sb = malloc(sizeof(struct btrfs_super_block));
+	sb = malloc(BTRFS_SUPER_INFO_SIZE);
 	if (!sb) {
 		fprintf(stderr, "allocating memory for sb failed.\n");
 		ret = -ENOMEM;
@@ -1349,7 +1352,10 @@ static int recover_prepare(struct recover_control *rc, char *path)
 
 	ret = btrfs_read_dev_super(fd, sb, BTRFS_SUPER_INFO_OFFSET, 1);
 	if (ret) {
-		fprintf(stderr, "read super block error\n");
+		if (ret == -ENOENT)
+			fprintf(stderr, "No valid btrfs found\n");
+		if (ret == -EIO)
+			fprintf(stderr, "Superblock is corrupted\n");
 		goto fail_free_sb;
 	}
 
