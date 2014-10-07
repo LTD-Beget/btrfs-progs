@@ -542,6 +542,8 @@ struct btrfs_path {
 	int reada;
 	/* keep some upper locks as we walk down */
 	int lowest_level;
+	/* For check: Sort the keys in a block before applying a binary search */
+	int bin_search_presort;
 
 	/*
 	 * set by btrfs_split_item, tells search_slot to keep all locks
