@@ -30,6 +30,7 @@
 #include "print-tree.h"
 #include "volumes.h"
 #include "math.h"
+#include "utils.h"
 
 struct stripe {
 	struct btrfs_device *dev;
@@ -1534,6 +1535,30 @@ btrfs_find_device_by_devid(struct btrfs_fs_devices *fs_devices,
 			return dev;
 	}
 	return NULL;
+}
+
+/*
+ * Register all devices in the fs_uuid list created in the user
+ * space. Ensure btrfs_scan_lblkid() is called before this func.
+ */
+int btrfs_register_all_devices(void)
+{
+	int err;
+	struct btrfs_fs_devices *fs_devices;
+	struct btrfs_device *device;
+
+	list_for_each_entry(fs_devices, &fs_uuids, list) {
+		list_for_each_entry(device, &fs_devices->devices, dev_list) {
+			if (strlen(device->name) != 0) {
+				err = btrfs_register_one_device(device->name);
+				if (err < 0)
+					return err;
+				if (err > 0)
+					return -err;
+			}
+		}
+	}
+	return 0;
 }
 
 int btrfs_chunk_readonly(struct btrfs_root *root, u64 chunk_offset)
