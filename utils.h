@@ -81,7 +81,8 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 		      u64 block_count, u32 io_width, u32 io_align,
 		      u32 sectorsize);
 int btrfs_scan_for_fsid(int run_ioctls);
-void btrfs_register_one_device(char *fname);
+int btrfs_register_one_device(const char *fname);
+int btrfs_register_all_devices(void);
 char *canonicalize_dm_name(const char *ptname);
 char *canonicalize_path(const char *path);
 int check_mounted(const char *devicename);
@@ -127,12 +128,18 @@ int csum_tree_block(struct btrfs_root *root, struct extent_buffer *buf,
 			   int verify);
 int ask_user(char *question);
 int lookup_ino_rootid(int fd, u64 *rootid);
-int btrfs_scan_lblkid(int update_kernel);
+int btrfs_scan_lblkid(void);
 int get_btrfs_mount(const char *dev, char *mp, size_t mp_size);
 int find_mount_root(const char *path, char **mount_root);
 int get_device_info(int fd, u64 devid,
 		struct btrfs_ioctl_dev_info_args *di_args);
 int test_uuid_unique(char *fs_uuid);
+u64 disk_size(char *path);
+int get_device_info(int fd, u64 devid,
+		struct btrfs_ioctl_dev_info_args *di_args);
+u64 get_partition_size(char *dev);
+const char* group_type_str(u64 flags);
+const char* group_profile_str(u64 flags);
 
 int test_minimum_size(const char *file, u32 leafsize);
 int test_issubvolname(const char *name);
@@ -159,5 +166,7 @@ static inline u64 btrfs_min_dev_size(u32 leafsize)
 }
 
 int find_next_key(struct btrfs_path *path, struct btrfs_key *key);
+char* btrfs_group_type_str(u64 flag);
+char* btrfs_group_profile_str(u64 flag);
 
 #endif
