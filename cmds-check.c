@@ -7551,7 +7551,7 @@ static struct option long_options[] = {
 	{ "init-extent-tree", 0, NULL, 0 },
 	{ "check-data-csum", 0, NULL, 0 },
 	{ "backup", 0, NULL, 0 },
-	{ "subvol-extents", no_argument, NULL, 'E' },
+	{ "subvol-extents", 1, NULL, 'E' },
 	{ "qgroup-report", 0, NULL, 'Q' },
 	{ NULL, 0, NULL, 0}
 };
@@ -7567,7 +7567,7 @@ const char * const cmd_check_usage[] = {
 	"--init-extent-tree          create a new extent tree",
 	"--check-data-csum           verify checkums of data blocks",
 	"--qgroup-report             print a report on qgroup consistency",
-	"--subvol-extents            print subvolume extents and sharing state",
+	"--subvol-extents <subvolid> print subvolume extents and sharing state",
 	NULL
 };
 
