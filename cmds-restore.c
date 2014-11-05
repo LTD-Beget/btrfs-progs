@@ -840,6 +840,8 @@ static int search_dir(struct btrfs_root *root, struct btrfs_key *key,
 			ret = copy_file(root, fd, &location, path_name);
 			close(fd);
 			if (ret) {
+				fprintf(stderr, "Error copying data for %s\n",
+					path_name);
 				if (ignore_errors)
 					goto next;
 				btrfs_free_path(path);
@@ -917,6 +919,8 @@ static int search_dir(struct btrfs_root *root, struct btrfs_key *key,
 					 output_rootdir, dir, mreg);
 			free(dir);
 			if (ret) {
+				fprintf(stderr, "Error searching %s\n",
+					path_name);
 				if (ignore_errors)
 					goto next;
 				btrfs_free_path(path);
@@ -963,8 +967,9 @@ static int do_list_roots(struct btrfs_root *root)
 		return -1;
 	}
 
+	leaf = path->nodes[0];
+
 	while (1) {
-		leaf = path->nodes[0];
 		slot = path->slots[0];
 		if (slot >= btrfs_header_nritems(leaf)) {
 			ret = btrfs_next_leaf(root, path);
