@@ -28,6 +28,7 @@
 #include "ctree.h"
 #include "ioctl.h"
 #include "utils.h"
+#include "cmds-fi-disk_usage.h"
 
 #include "commands.h"
 
@@ -408,31 +409,37 @@ static int cmd_dev_stats(int argc, char **argv)
 				path, strerror(errno));
 			err = 1;
 		} else {
+			char *canonical_path;
+
+			canonical_path = canonicalize_path((char *)path);
+
 			if (args.nr_items >= BTRFS_DEV_STAT_WRITE_ERRS + 1)
 				printf("[%s].write_io_errs   %llu\n",
-				       path,
+				       canonical_path,
 				       (unsigned long long) args.values[
 					BTRFS_DEV_STAT_WRITE_ERRS]);
 			if (args.nr_items >= BTRFS_DEV_STAT_READ_ERRS + 1)
 				printf("[%s].read_io_errs    %llu\n",
-				       path,
+				       canonical_path,
 				       (unsigned long long) args.values[
 					BTRFS_DEV_STAT_READ_ERRS]);
 			if (args.nr_items >= BTRFS_DEV_STAT_FLUSH_ERRS + 1)
 				printf("[%s].flush_io_errs   %llu\n",
-				       path,
+				       canonical_path,
 				       (unsigned long long) args.values[
 					BTRFS_DEV_STAT_FLUSH_ERRS]);
 			if (args.nr_items >= BTRFS_DEV_STAT_CORRUPTION_ERRS + 1)
 				printf("[%s].corruption_errs %llu\n",
-				       path,
+				       canonical_path,
 				       (unsigned long long) args.values[
 					BTRFS_DEV_STAT_CORRUPTION_ERRS]);
 			if (args.nr_items >= BTRFS_DEV_STAT_GENERATION_ERRS + 1)
 				printf("[%s].generation_errs %llu\n",
-				       path,
+				       canonical_path,
 				       (unsigned long long) args.values[
 					BTRFS_DEV_STAT_GENERATION_ERRS]);
+
+			free(canonical_path);
 		}
 	}
 
@@ -443,6 +450,94 @@ out:
 	return err;
 }
 
+const char * const cmd_device_usage_usage[] = {
+	"btrfs device usage [-b] <path> [<path>..]",
+	"Show which chunks are in a device.",
+	"",
+	"-b\tSet byte as unit",
+	NULL
+};
+
+static int _cmd_device_usage(int fd, char *path, int mode)
+{
+	int i;
+	int ret = 0;
+	struct chunk_info *chunkinfo = NULL;
+	struct device_info *devinfo = NULL;
+	int chunkcount = 0;
+	int devcount = 0;
+
+	ret = load_chunk_and_device_info(fd, &chunkinfo, &chunkcount, &devinfo,
+			&devcount);
+	if (ret)
+		goto out;
+
+	for (i = 0; i < devcount; i++) {
+		printf("%s, ID: %llu\n", devinfo[i].path, devinfo[i].devid);
+		print_device_sizes(fd, &devinfo[i], mode);
+		print_device_chunks(fd, &devinfo[i], chunkinfo, chunkcount,
+				mode);
+		printf("\n");
+	}
+
+out:
+	free(devinfo);
+	free(chunkinfo);
+
+	return ret;
+}
+
+int cmd_device_usage(int argc, char **argv)
+{
+
+	int mode = UNITS_HUMAN;
+	int ret = 0;
+	int	i, more_than_one = 0;
+
+	optind = 1;
+	while (1) {
+		int c = getopt(argc, argv, "b");
+
+		if (c < 0)
+			break;
+
+		switch (c) {
+		case 'b':
+			mode = UNITS_RAW;
+			break;
+		default:
+			usage(cmd_device_usage_usage);
+		}
+	}
+
+	if (check_argc_min(argc - optind, 1))
+		usage(cmd_device_usage_usage);
+
+	for (i = optind; i < argc ; i++) {
+		int fd;
+		DIR	*dirstream = NULL;
+		if (more_than_one)
+			printf("\n");
+
+		fd = open_file_or_dir(argv[i], &dirstream);
+		if (fd < 0) {
+			fprintf(stderr, "ERROR: can't access '%s'\n",
+				argv[1]);
+			ret = 1;
+			goto out;
+		}
+
+		ret = _cmd_device_usage(fd, argv[i], mode);
+		close_file_or_dir(fd, dirstream);
+
+		if (ret)
+			goto out;
+		more_than_one = 1;
+	}
+out:
+	return !!ret;
+}
+
 const struct cmd_group device_cmd_group = {
 	device_cmd_group_usage, NULL, {
 		{ "add", cmd_add_dev, cmd_add_dev_usage, NULL, 0 },
@@ -450,6 +545,8 @@ const struct cmd_group device_cmd_group = {
 		{ "scan", cmd_scan_dev, cmd_scan_dev_usage, NULL, 0 },
 		{ "ready", cmd_ready_dev, cmd_ready_dev_usage, NULL, 0 },
 		{ "stats", cmd_dev_stats, cmd_dev_stats_usage, NULL, 0 },
+		{ "usage", cmd_device_usage,
+			cmd_device_usage_usage, NULL, 0 },
 		NULL_CMD_STRUCT
 	}
 };
