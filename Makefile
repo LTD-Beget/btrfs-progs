@@ -50,6 +50,9 @@ progs = mkfs.btrfs btrfs-debug-tree btrfsck \
 	btrfs btrfs-map-logical btrfs-image btrfs-zero-log btrfs-convert \
 	btrfs-find-root btrfstune btrfs-show-super
 
+progs_extra = btrfs-corrupt-block btrfs-fragments btrfs-calc-size \
+	      btrfs-select-super
+
 progs_static = $(foreach p,$(progs),$(p).static)
 
 # external libs required by various binaries; for btrfs-foo,
@@ -240,6 +243,22 @@ send-test: $(objects) $(libs) send-test.o
 	@echo "    [LD]     $@"
 	$(Q)$(CC) $(CFLAGS) -o send-test $(objects) send-test.o $(LDFLAGS) $(LIBS) -lpthread
 
+library-test: $(libs_shared) library-test.o
+	@echo "    [LD]     $@"
+	$(Q)$(CC) $(CFLAGS) -o library-test library-test.o $(LDFLAGS) -lbtrfs
+
+library-test.static: $(libs_static) library-test.o
+	@echo "    [LD]     $@"
+	$(Q)$(CC) $(CFLAGS) -o library-test-static library-test.o $(LDFLAGS) $(libs_static)
+
+test-build:
+	$(MAKE) clean-all
+	$(MAKE) library-test
+	-$(MAKE) library-test.static
+	$(MAKE) -j 8 all
+	-$(MAKE) -j 8 static
+	$(MAKE) -j 8 $(progs_extra)
+
 manpages:
 	$(Q)$(MAKE) $(MAKEOPTS) -C Documentation
 
@@ -247,11 +266,12 @@ clean-all: clean-doc clean
 
 clean: $(CLEANDIRS)
 	@echo "Cleaning"
-	$(Q)rm -f $(progs) cscope.out *.o *.o.d btrfs-convert btrfs-image btrfs-select-super \
-	      btrfs-zero-log btrfstune dir-test ioctl-test quick-test send-test btrfsck \
-	      btrfs.static mkfs.btrfs.static btrfs-calc-size \
+	$(Q)rm -f $(progs) cscope.out *.o *.o.d \
+	      dir-test ioctl-test quick-test send-test library-test library-test-static \
+	      btrfs.static mkfs.btrfs.static \
 	      version.h $(check_defs) \
-	      $(libs) $(lib_links)
+	      $(libs) $(lib_links) \
+	      $(progs_static) $(progs_extra)
 
 clean-doc:
 	@echo "Cleaning Documentation"

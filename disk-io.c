@@ -937,7 +937,8 @@ int btrfs_setup_all_roots(struct btrfs_fs_info *fs_info, u64 root_tree_bytenr,
 	ret = find_and_setup_log_root(root, fs_info, sb);
 	if (ret) {
 		printk("Couldn't setup log root tree\n");
-		return -EIO;
+		if (!(flags & OPEN_CTREE_PARTIAL))
+			return -EIO;
 	}
 
 	fs_info->generation = generation;
@@ -1007,9 +1008,19 @@ int btrfs_scan_fs_devices(int fd, const char *path,
 			  u64 sb_bytenr, int super_recover)
 {
 	u64 total_devs;
+	u64 dev_size;
 	int ret;
 	if (!sb_bytenr)
 		sb_bytenr = BTRFS_SUPER_INFO_OFFSET;
+
+	dev_size = lseek(fd, 0, SEEK_END);
+	if (dev_size < 0)
+		return (int)(dev_size);
+	lseek(fd, 0, SEEK_SET);
+	if (sb_bytenr > dev_size) {
+		fprintf(stderr, "Superblock bytenr is larger than device size\n");
+		return -EINVAL;
+	}
 
 	ret = btrfs_scan_one_device(fd, path, fs_devices,
 				    &total_devs, sb_bytenr, super_recover);
