@@ -38,12 +38,48 @@
 #include "transaction.h"
 #include "crc32c.h"
 #include "utils.h"
+#include "task-util.h"
 #include <ext2fs/ext2_fs.h>
 #include <ext2fs/ext2fs.h>
 #include <ext2fs/ext2_ext_attr.h>
 
 #define INO_OFFSET (BTRFS_FIRST_FREE_OBJECTID - EXT2_ROOT_INO)
 #define EXT2_IMAGE_SUBVOL_OBJECTID BTRFS_FIRST_FREE_OBJECTID
+
+struct private {
+	uint32_t max_copy_inodes;
+	uint32_t cur_copy_inodes;
+	struct task_info *info;
+};
+
+static void *print_copied_inodes(void *p)
+{
+	struct private *priv = p;
+	const char work_indicator[] = { '.', 'o', 'O', 'o' };
+	uint32_t count = 0;
+
+	task_period_start(priv->info, 1000 /* 1s */);
+	while (1) {
+		count++;
+		printf("copy inodes [%c] [%10d/%10d]\r",
+		       work_indicator[count % 4], priv->cur_copy_inodes,
+		       priv->max_copy_inodes);
+		fflush(stdout);
+		task_period_wait(priv->info);
+	}
+
+	return NULL;
+}
+
+static int after_copied_inodes(void *p)
+{
+	struct private *priv = p;
+
+	printf("\n");
+	task_period_stop(priv->info);
+
+	return 0;
+}
 
 /*
  * Open Ext2fs in readonly mode, read block allocation bitmap and
@@ -1036,7 +1072,7 @@ fail:
  * scan ext2's inode bitmap and copy all used inodes.
  */
 static int copy_inodes(struct btrfs_root *root, ext2_filsys ext2_fs,
-		       int datacsum, int packing, int noxattr)
+		       int datacsum, int packing, int noxattr, struct private *p)
 {
 	int ret;
 	errcode_t err;
@@ -1068,6 +1104,7 @@ static int copy_inodes(struct btrfs_root *root, ext2_filsys ext2_fs,
 					objectid, ext2_fs, ext2_ino,
 					&ext2_inode, datacsum, packing,
 					noxattr);
+		p->cur_copy_inodes++;
 		if (ret)
 			return ret;
 		if (trans->blocks_used >= 4096) {
@@ -2197,7 +2234,7 @@ err:
 }
 
 static int do_convert(const char *devname, int datacsum, int packing, int noxattr,
-	       int copylabel, const char *fslabel)
+	       int copylabel, const char *fslabel, int progress)
 {
 	int i, ret;
 	int fd = -1;
@@ -2275,10 +2312,22 @@ static int do_convert(const char *devname, int datacsum, int packing, int noxatt
 		goto fail;
 	}
 	printf("creating btrfs metadata.\n");
-	ret = copy_inodes(root, ext2_fs, datacsum, packing, noxattr);
+	struct private p = {
+		.max_copy_inodes = (ext2_fs->super->s_inodes_count - ext2_fs->super->s_free_inodes_count),
+		.cur_copy_inodes = 0,
+	};
+	if (progress) {
+		p.info = task_init(print_copied_inodes, after_copied_inodes, &p);
+		task_start(p.info);
+	}
+	ret = copy_inodes(root, ext2_fs, datacsum, packing, noxattr, &p);
 	if (ret) {
 		fprintf(stderr, "error during copy_inodes %d\n", ret);
 		goto fail;
+	}
+	if (progress) {
+		task_stop(p.info);
+		task_deinit(p.info);
 	}
 	printf("creating ext2fs image file.\n");
 	ext2_root = link_subvol(root, "ext2_saved", EXT2_IMAGE_SUBVOL_OBJECTID);
@@ -2703,6 +2752,7 @@ static void print_usage(void)
 	printf("\t-r           roll back to ext2fs\n");
 	printf("\t-l LABEL     set filesystem label\n");
 	printf("\t-L           use label from converted fs\n");
+	printf("\t-p           show converting progress\n");
 }
 
 int main(int argc, char *argv[])
@@ -2714,11 +2764,12 @@ int main(int argc, char *argv[])
 	int rollback = 0;
 	int copylabel = 0;
 	int usage_error = 0;
+	int progress = 0;
 	char *file;
 	char *fslabel = NULL;
 
 	while(1) {
-		int c = getopt(argc, argv, "dinrl:L");
+		int c = getopt(argc, argv, "dinrl:Lp");
 		if (c < 0)
 			break;
 		switch(c) {
@@ -2746,6 +2797,9 @@ int main(int argc, char *argv[])
 				break;
 			case 'L':
 				copylabel = 1;
+				break;
+			case 'p':
+				progress = 1;
 				break;
 			default:
 				print_usage();
@@ -2784,7 +2838,7 @@ int main(int argc, char *argv[])
 	if (rollback) {
 		ret = do_rollback(file);
 	} else {
-		ret = do_convert(file, datacsum, packing, noxattr, copylabel, fslabel);
+		ret = do_convert(file, datacsum, packing, noxattr, copylabel, fslabel, progress);
 	}
 	if (ret)
 		return 1;

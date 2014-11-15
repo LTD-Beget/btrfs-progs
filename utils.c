@@ -38,6 +38,8 @@
 #include <linux/kdev_t.h>
 #include <limits.h>
 #include <blkid/blkid.h>
+#include <sys/vfs.h>
+
 #include "kerncompat.h"
 #include "radix-tree.h"
 #include "ctree.h"
@@ -1812,6 +1814,75 @@ int get_device_info(int fd, u64 devid,
 	return ret ? -errno : 0;
 }
 
+static u64 find_max_device_id(struct btrfs_ioctl_search_args *search_args,
+			      int nr_items)
+{
+	struct btrfs_dev_item *dev_item;
+	char *buf = search_args->buf;
+
+	buf += (nr_items - 1) * (sizeof(struct btrfs_ioctl_search_header)
+				       + sizeof(struct btrfs_dev_item));
+	buf += sizeof(struct btrfs_ioctl_search_header);
+
+	dev_item = (struct btrfs_dev_item *)buf;
+
+	return btrfs_stack_device_id(dev_item);
+}
+
+static int search_chunk_tree_for_fs_info(int fd,
+				struct btrfs_ioctl_fs_info_args *fi_args)
+{
+	int ret;
+	int max_items;
+	u64 start_devid = 1;
+	struct btrfs_ioctl_search_args search_args;
+	struct btrfs_ioctl_search_key *search_key = &search_args.key;
+
+	fi_args->num_devices = 0;
+
+	max_items = BTRFS_SEARCH_ARGS_BUFSIZE
+	       / (sizeof(struct btrfs_ioctl_search_header)
+			       + sizeof(struct btrfs_dev_item));
+
+	search_key->tree_id = BTRFS_CHUNK_TREE_OBJECTID;
+	search_key->min_objectid = BTRFS_DEV_ITEMS_OBJECTID;
+	search_key->max_objectid = BTRFS_DEV_ITEMS_OBJECTID;
+	search_key->min_type = BTRFS_DEV_ITEM_KEY;
+	search_key->max_type = BTRFS_DEV_ITEM_KEY;
+	search_key->min_transid = 0;
+	search_key->max_transid = (u64)-1;
+	search_key->nr_items = max_items;
+	search_key->max_offset = (u64)-1;
+
+again:
+	search_key->min_offset = start_devid;
+
+	ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, &search_args);
+	if (ret < 0)
+		return -errno;
+
+	fi_args->num_devices += (u64)search_key->nr_items;
+
+	if (search_key->nr_items == max_items) {
+		start_devid = find_max_device_id(&search_args,
+					search_key->nr_items) + 1;
+		goto again;
+	}
+
+	/* get the lastest max_id to stay consistent with the num_devices */
+	if (search_key->nr_items == 0)
+		/*
+		 * last tree_search returns an empty buf, use the devid of
+		 * the last dev_item of the previous tree_search
+		 */
+		fi_args->max_id = start_devid - 1;
+	else
+		fi_args->max_id = find_max_device_id(&search_args,
+						search_key->nr_items);
+
+	return 0;
+}
+
 /*
  * For a given path, fill in the ioctl fs_ and info_ args.
  * If the path is a btrfs mountpoint, fill info for all devices.
@@ -1891,6 +1962,13 @@ int get_fs_info(char *path, struct btrfs_ioctl_fs_info_args *fi_args,
 			ret = -errno;
 			goto out;
 		}
+
+		/*
+		 * The fs_args->num_devices does not include seed devices
+		 */
+		ret = search_chunk_tree_for_fs_info(fd, fi_args);
+		if (ret)
+			goto out;
 	}
 
 	if (!fi_args->num_devices)
@@ -1903,7 +1981,6 @@ int get_fs_info(char *path, struct btrfs_ioctl_fs_info_args *fi_args,
 	}
 
 	for (; i <= fi_args->max_id; ++i) {
-		BUG_ON(ndevs >= fi_args->num_devices);
 		ret = get_device_info(fd, i, &di_args[ndevs]);
 		if (ret == -ENODEV)
 			continue;
@@ -2081,6 +2158,25 @@ out:
 	return ret;
 }
 
+static int group_profile_devs_min(u64 flag)
+{
+	switch (flag & BTRFS_BLOCK_GROUP_PROFILE_MASK) {
+	case 0: /* single */
+	case BTRFS_BLOCK_GROUP_DUP:
+		return 1;
+	case BTRFS_BLOCK_GROUP_RAID0:
+	case BTRFS_BLOCK_GROUP_RAID1:
+	case BTRFS_BLOCK_GROUP_RAID5:
+		return 2;
+	case BTRFS_BLOCK_GROUP_RAID6:
+		return 3;
+	case BTRFS_BLOCK_GROUP_RAID10:
+		return 4;
+	default:
+		return -1;
+	}
+}
+
 int test_num_disk_vs_raid(u64 metadata_profile, u64 data_profile,
 	u64 dev_cnt, int mixed, char *estr)
 {
@@ -2101,16 +2197,26 @@ int test_num_disk_vs_raid(u64 metadata_profile, u64 data_profile,
 		allowed |= BTRFS_BLOCK_GROUP_DUP;
 	}
 
+	if (dev_cnt > 1 &&
+	    ((metadata_profile | data_profile) & BTRFS_BLOCK_GROUP_DUP)) {
+		snprintf(estr, sz,
+			"DUP is not allowed when FS has multiple devices\n");
+		return 1;
+	}
 	if (metadata_profile & ~allowed) {
-		snprintf(estr, sz, "unable to create FS with metadata "
-			"profile %llu (have %llu devices)\n",
-			metadata_profile, dev_cnt);
+		snprintf(estr, sz,
+			"unable to create FS with metadata profile %s "
+			"(have %llu devices but %d devices are required)\n",
+			btrfs_group_profile_str(metadata_profile), dev_cnt,
+			group_profile_devs_min(metadata_profile));
 		return 1;
 	}
 	if (data_profile & ~allowed) {
-		snprintf(estr, sz, "unable to create FS with data "
-			"profile %llu (have %llu devices)\n",
-			metadata_profile, dev_cnt);
+		snprintf(estr, sz,
+			"unable to create FS with data profile %s "
+			"(have %llu devices but %d devices are required)\n",
+			btrfs_group_profile_str(data_profile), dev_cnt,
+			group_profile_devs_min(data_profile));
 		return 1;
 	}
 
@@ -2448,4 +2554,73 @@ int find_next_key(struct btrfs_path *path, struct btrfs_key *key)
 		return 0;
 	}
 	return 1;
+}
+
+char* btrfs_group_type_str(u64 flag)
+{
+	u64 mask = BTRFS_BLOCK_GROUP_TYPE_MASK |
+		BTRFS_SPACE_INFO_GLOBAL_RSV;
+
+	switch (flag & mask) {
+	case BTRFS_BLOCK_GROUP_DATA:
+		return "Data";
+	case BTRFS_BLOCK_GROUP_SYSTEM:
+		return "System";
+	case BTRFS_BLOCK_GROUP_METADATA:
+		return "Metadata";
+	case BTRFS_BLOCK_GROUP_DATA|BTRFS_BLOCK_GROUP_METADATA:
+		return "Data+Metadata";
+	case BTRFS_SPACE_INFO_GLOBAL_RSV:
+		return "GlobalReserve";
+	default:
+		return "unknown";
+	}
+}
+
+char* btrfs_group_profile_str(u64 flag)
+{
+	switch (flag & BTRFS_BLOCK_GROUP_PROFILE_MASK) {
+	case 0:
+		return "single";
+	case BTRFS_BLOCK_GROUP_RAID0:
+		return "RAID0";
+	case BTRFS_BLOCK_GROUP_RAID1:
+		return "RAID1";
+	case BTRFS_BLOCK_GROUP_RAID5:
+		return "RAID5";
+	case BTRFS_BLOCK_GROUP_RAID6:
+		return "RAID6";
+	case BTRFS_BLOCK_GROUP_DUP:
+		return "DUP";
+	case BTRFS_BLOCK_GROUP_RAID10:
+		return "RAID10";
+	default:
+		return "unknown";
+	}
+}
+
+u64 disk_size(char *path)
+{
+	struct statfs sfs;
+
+	if (statfs(path, &sfs) < 0)
+		return 0;
+	else
+		return sfs.f_bsize * sfs.f_blocks;
+}
+
+u64 get_partition_size(char *dev)
+{
+	u64 result;
+	int fd = open(dev, O_RDONLY);
+
+	if (fd < 0)
+		return 0;
+	if (ioctl(fd, BLKGETSIZE64, &result) < 0) {
+		close(fd);
+		return 0;
+	}
+	close(fd);
+
+	return result;
 }

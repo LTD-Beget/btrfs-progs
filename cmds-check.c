@@ -6256,6 +6256,13 @@ u64 calc_stripe_length(u64 type, u64 length, int num_stripes)
 	return stripe_size;
 }
 
+/*
+ * Check the chunk with its block group/dev list ref:
+ * Return 0 if all refs seems valid.
+ * Return 1 if part of refs seems valid, need later check for rebuild ref
+ * like missing block group and needs to search extent tree to rebuild them.
+ * Return -1 if essential refs are missing and unable to rebuild.
+ */
 static int check_chunk_refs(struct chunk_record *chunk_rec,
 			    struct block_group_tree *block_group_cache,
 			    struct device_extent_tree *dev_extent_cache,
@@ -6311,7 +6318,7 @@ static int check_chunk_refs(struct chunk_record *chunk_rec,
 				chunk_rec->length,
 				chunk_rec->offset,
 				chunk_rec->type_flags);
-		ret = -1;
+		ret = 1;
 	}
 
 	length = calc_stripe_length(chunk_rec->type_flags, chunk_rec->length,
@@ -6364,7 +6371,8 @@ static int check_chunk_refs(struct chunk_record *chunk_rec,
 int check_chunks(struct cache_tree *chunk_cache,
 		 struct block_group_tree *block_group_cache,
 		 struct device_extent_tree *dev_extent_cache,
-		 struct list_head *good, struct list_head *bad, int silent)
+		 struct list_head *good, struct list_head *bad,
+		 struct list_head *rebuild, int silent)
 {
 	struct cache_extent *chunk_item;
 	struct chunk_record *chunk_rec;
@@ -6379,15 +6387,14 @@ int check_chunks(struct cache_tree *chunk_cache,
 					 cache);
 		err = check_chunk_refs(chunk_rec, block_group_cache,
 				       dev_extent_cache, silent);
-		if (err) {
+		if (err)
 			ret = err;
-			if (bad)
-				list_add_tail(&chunk_rec->list, bad);
-		} else {
-			if (good)
-				list_add_tail(&chunk_rec->list, good);
-		}
-
+		if (err == 0 && good)
+			list_add_tail(&chunk_rec->list, good);
+		if (err > 0 && rebuild)
+			list_add_tail(&chunk_rec->list, rebuild);
+		if (err < 0 && bad)
+			list_add_tail(&chunk_rec->list, bad);
 		chunk_item = next_cache_extent(chunk_item);
 	}
 
@@ -6671,7 +6678,7 @@ again:
 	}
 
 	err = check_chunks(&chunk_cache, &block_group_cache,
-			   &dev_extent_cache, NULL, NULL, 0);
+			   &dev_extent_cache, NULL, NULL, NULL, 0);
 	if (err && !ret)
 		ret = err;
 
@@ -7669,6 +7676,7 @@ static struct option long_options[] = {
 	{ "backup", 0, NULL, 0 },
 	{ "subvol-extents", 1, NULL, 'E' },
 	{ "qgroup-report", 0, NULL, 'Q' },
+	{ "tree-root", 1, NULL, 'r' },
 	{ NULL, 0, NULL, 0}
 };
 
@@ -7684,6 +7692,7 @@ const char * const cmd_check_usage[] = {
 	"--check-data-csum           verify checkums of data blocks",
 	"--qgroup-report             print a report on qgroup consistency",
 	"--subvol-extents <subvolid> print subvolume extents and sharing state",
+	"--tree-root <bytenr>        use the given bytenr for the tree root",
 	NULL
 };
 
@@ -7694,6 +7703,7 @@ int cmd_check(int argc, char **argv)
 	struct btrfs_fs_info *info;
 	u64 bytenr = 0;
 	u64 subvolid = 0;
+	u64 tree_root_bytenr = 0;
 	char uuidbuf[BTRFS_UUID_UNPARSED_SIZE];
 	int ret;
 	u64 num;
@@ -7704,7 +7714,7 @@ int cmd_check(int argc, char **argv)
 
 	while(1) {
 		int c;
-		c = getopt_long(argc, argv, "as:b", long_options,
+		c = getopt_long(argc, argv, "as:br:", long_options,
 				&option_index);
 		if (c < 0)
 			break;
@@ -7730,6 +7740,9 @@ int cmd_check(int argc, char **argv)
 				break;
 			case 'E':
 				subvolid = arg_strtou64(optarg);
+				break;
+			case 'r':
+				tree_root_bytenr = arg_strtou64(optarg);
 				break;
 			case '?':
 			case 'h':
@@ -7774,7 +7787,8 @@ int cmd_check(int argc, char **argv)
 	if (repair)
 		ctree_flags |= OPEN_CTREE_PARTIAL;
 
-	info = open_ctree_fs_info(argv[optind], bytenr, 0, ctree_flags);
+	info = open_ctree_fs_info(argv[optind], bytenr, tree_root_bytenr,
+				  ctree_flags);
 	if (!info) {
 		fprintf(stderr, "Couldn't open file system\n");
 		ret = -EIO;
