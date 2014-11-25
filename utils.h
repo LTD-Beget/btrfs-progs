@@ -161,4 +161,6 @@ static inline u64 btrfs_min_dev_size(u32 leafsize)
 
 int find_next_key(struct btrfs_path *path, struct btrfs_key *key);
 
+int btrfs_tree_search2_ioctl_supported(int fd);
+
 #endif
